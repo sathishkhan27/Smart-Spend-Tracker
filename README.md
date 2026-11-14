@@ -18,7 +18,8 @@ It is designed for Android and iOS, with Firebase-powered sync, workspace sharin
 
 ## Sample Screenshot
 
-![Smart Spend Tracker dashboard showing monthly cash flow, transactions, and credit cards](docs/assets/screenshots/dashboard.png)
+<img width="540" height="1200" alt="WhatsApp Image 2026-11-14 at 11 24 53" src="https://github.com/user-attachments/assets/0cd98809-7ae5-45b2-9caa-749385d3bc16" />
+
 
 *Sample app dashboard. Save the screenshot you shared as `docs/assets/screenshots/dashboard.png` in the repository to display it here.*
 
