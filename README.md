@@ -16,6 +16,12 @@ It is designed for Android and iOS, with Firebase-powered sync, workspace sharin
 - Offline queueing and background synchronization
 - Light and dark theme support
 
+## Sample Screenshot
+
+![Smart Spend Tracker dashboard showing monthly cash flow, transactions, and credit cards](docs/assets/screenshots/dashboard.png)
+
+*Sample app dashboard. Save the screenshot you shared as `docs/assets/screenshots/dashboard.png` in the repository to display it here.*
+
 ## Tech Stack
 
 - Flutter / Dart
@@ -86,4 +92,4 @@ This project uses Firebase for shared data sync, role-based workspaces, and sche
 
 ## License
 
-This project is for personal and commercial use according to the repository's licensing terms. See the repository for the exact license file if present.
+See the repository's license file for applicable terms.
