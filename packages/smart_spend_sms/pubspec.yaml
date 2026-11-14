@@ -1,0 +1,19 @@
+name: smart_spend_sms
+description: On-device SMS inbox reader for Smart Spend (Android). Registered as a plugin so background engines (WorkManager sync) get it too.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.2
+  flutter: ">=3.35.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.smartspend.sms
+        pluginClass: SmartSpendSmsPlugin

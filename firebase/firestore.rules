@@ -1,0 +1,184 @@
+rules_version = '2';
+
+// Smart Spend Tracker — Firestore security rules.
+// Model: shared workspace visibility. Members read the workspace's canonical
+// transactions; owners (and workspace admins) manage them; private source
+// details are readable only by the contributing user. Server-only collections
+// (aggregates, counterparties) are written by Cloud Functions (Admin SDK).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function verified() { return signedIn() && request.auth.token.email_verified == true; }
+    function memberDoc(wid) { return /databases/$(database)/documents/workspace_members/$(wid + '_' + uid()); }
+    function isMember(wid) { return signedIn() && exists(memberDoc(wid)); }
+    function isAdmin(wid) { return isMember(wid) && get(memberDoc(wid)).data.role == 'admin'; }
+    function onlyChanges(fields) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields); }
+    function unchanged(field) { return request.resource.data[field] == resource.data[field]; }
+
+    function validTransaction(d) {
+      return d.amount is number && d.amount > 0 && d.amount < 1000000000
+        && d.currency is string && d.currency.size() == 3
+        && d.direction in ['inflow', 'outflow']
+        && d.status in ['pending', 'processing', 'success', 'failed', 'duplicate', 'needsReview', 'ignored']
+        && d.source in ['sms', 'email', 'manual']
+        && d.transactionDate is timestamp
+        && d.categoryId is string
+        && (!('maskedAccountNumber' in d) || d.maskedAccountNumber == null || d.maskedAccountNumber.matches('^XX[0-9]{3,4}$'));
+    }
+
+    // ---------- users ----------
+    // One entry per signed-in phone: { token, platform, lastSeenAt }.
+    match /users/{userId}/devices/{deviceId} {
+      allow read, delete: if signedIn() && uid() == userId;
+      allow create, update: if signedIn() && uid() == userId
+        && request.resource.data.token is string && request.resource.data.token.size() < 4096;
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && uid() == userId;
+      allow create: if signedIn() && uid() == userId && request.resource.data.email == request.auth.token.email;
+      // A user may only point activeWorkspaceId at a workspace they belong to.
+      allow update: if signedIn() && uid() == userId
+        && request.resource.data.email == resource.data.email
+        && (request.resource.data.get('activeWorkspaceId', null) == resource.data.get('activeWorkspaceId', null)
+            || isMember(request.resource.data.activeWorkspaceId));
+      allow delete: if false; // via deleteMyData function
+    }
+
+    // ---------- workspaces ----------
+    match /workspaces/{wid} {
+      allow read: if isMember(wid);
+      allow create: if signedIn() && request.resource.data.ownerId == uid() && request.resource.data.memberCount == 1;
+      allow update: if isAdmin(wid) && onlyChanges(['name', 'timezone', 'currency']);
+      allow delete: if false;
+
+      // Server-maintained monthly aggregates.
+      match /monthly_stats/{statId} {
+        allow read: if verified() && isMember(wid);
+        allow write: if false;
+      }
+    }
+
+    match /workspace_members/{memberId} {
+      allow read: if signedIn() && (resource.data.userId == uid() || isMember(resource.data.workspaceId));
+      // Only the creator of a brand-new workspace may add themselves (as admin).
+      allow create: if signedIn()
+        && memberId == request.resource.data.workspaceId + '_' + uid()
+        && request.resource.data.userId == uid()
+        && request.resource.data.role == 'admin'
+        && !exists(/databases/$(database)/documents/workspaces/$(request.resource.data.workspaceId))
+        && getAfter(/databases/$(database)/documents/workspaces/$(request.resource.data.workspaceId)).data.ownerId == uid();
+      // Admins can change other members' roles; joining/removal happens server-side.
+      allow update: if isAdmin(resource.data.workspaceId) && resource.data.userId != uid()
+        && onlyChanges(['role']) && request.resource.data.role in ['admin', 'member'];
+      allow delete: if false;
+    }
+
+    match /workspace_invites/{code} {
+      allow read: if isAdmin(resource.data.workspaceId);
+      allow create: if isAdmin(request.resource.data.workspaceId) && request.resource.data.createdBy == uid()
+        && request.resource.data.role in ['member'];
+      allow update, delete: if false;
+    }
+
+    // ---------- transactions ----------
+    match /transactions/{txId} {
+      allow read: if verified() && isMember(resource.data.workspaceId);
+
+      allow create: if verified()
+        && isMember(request.resource.data.workspaceId)
+        && request.resource.data.ownerUserId == uid()
+        && request.resource.data.transactionId == txId
+        && validTransaction(request.resource.data);
+
+      allow update: if verified() && isMember(resource.data.workspaceId) && unchanged('workspaceId') && unchanged('ownerUserId') && (
+          // owner or workspace admin: full correction rights
+          ((resource.data.ownerUserId == uid() || isAdmin(resource.data.workspaceId)) && validTransaction(request.resource.data))
+          // any member: attach their own source to an existing canonical record (dedupe merge)
+          || onlyChanges(['sources', 'contributors', 'extractionConfidence', 'updatedAt'])
+        );
+
+      allow delete: if verified() && (resource.data.ownerUserId == uid() || isAdmin(resource.data.workspaceId));
+
+      // Private source details — only the contributing user.
+      match /private/{userId} {
+        allow read, write: if verified() && uid() == userId
+          && isMember(get(/databases/$(database)/documents/transactions/$(txId)).data.workspaceId);
+        allow create: if verified() && uid() == userId
+          && isMember(getAfter(/databases/$(database)/documents/transactions/$(txId)).data.workspaceId);
+      }
+    }
+
+    // ---------- workspace-scoped data ----------
+    match /transaction_rules/{ruleId} {
+      allow read: if verified() && isMember(resource.data.workspaceId);
+      allow create, update: if verified() && isMember(request.resource.data.workspaceId)
+        && (request.resource.data.type == 'merchant_category' || isAdmin(request.resource.data.workspaceId))
+        && (resource == null || resource.data.workspaceId == request.resource.data.workspaceId);
+      allow delete: if verified() && isAdmin(resource.data.workspaceId);
+    }
+
+    match /recurring_expenses/{id} {
+      // Sync checks whether an auto-detected / bank-reminder entry exists before
+      // writing it (ids "<workspaceId>_auto_…" / "<workspaceId>_due_…"). For a
+      // document that doesn't exist yet there is no data to check, so the
+      // workspace is taken from the id prefix.
+      allow get: if verified() && (resource == null
+        ? isMember(id.split('_')[0])
+        : isMember(resource.data.workspaceId));
+      allow list: if verified() && isMember(resource.data.workspaceId);
+      allow create: if verified() && isMember(request.resource.data.workspaceId) && request.resource.data.expectedAmount is number;
+      allow update: if verified() && isMember(resource.data.workspaceId) && unchanged('workspaceId');
+      allow delete: if verified() && isMember(resource.data.workspaceId);
+    }
+
+    // Credit cards detected from issuer SMS: credit_cards/{workspaceId}_{issuer}_{last4}.
+    match /credit_cards/{id} {
+      allow get: if verified() && (resource == null
+        ? isMember(id.split('_')[0])
+        : isMember(resource.data.workspaceId));
+      allow list: if verified() && isMember(resource.data.workspaceId);
+      allow create: if verified() && isMember(request.resource.data.workspaceId) && id.split('_')[0] == request.resource.data.workspaceId;
+      allow update: if verified() && isMember(resource.data.workspaceId) && unchanged('workspaceId');
+      allow delete: if verified() && isMember(resource.data.workspaceId);
+    }
+
+    match /counterparties/{id} {
+      allow read: if verified() && isMember(resource.data.workspaceId);
+      allow write: if false;
+    }
+
+    match /categories/{id} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // ---------- user-private ----------
+    match /connected_accounts/{id} {
+      allow read, delete: if signedIn() && resource.data.userId == uid();
+      allow create, update: if signedIn() && id == uid() + '_' + request.resource.data.provider
+        && request.resource.data.userId == uid()
+        && !('accessToken' in request.resource.data) && !('refreshToken' in request.resource.data) && !('password' in request.resource.data);
+    }
+
+    match /sync_logs/{id} {
+      allow read: if signedIn() && resource.data.userId == uid();
+      allow create: if signedIn() && request.resource.data.userId == uid();
+      allow update, delete: if false;
+    }
+
+    match /notifications/{id} {
+      allow read: if signedIn() && resource.data.userId == uid();
+      allow create: if signedIn() && request.resource.data.userId == uid();
+      allow update: if signedIn() && resource.data.userId == uid() && onlyChanges(['read']);
+      allow delete: if signedIn() && resource.data.userId == uid();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
