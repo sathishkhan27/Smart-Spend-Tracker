@@ -29,7 +29,9 @@ import '../../features/transactions/presentation/transactions_screen.dart';
 import '../../features/upcoming/domain/recurring_expense.dart';
 import '../../features/upcoming/presentation/recurring_edit_screen.dart';
 import '../../features/upcoming/presentation/upcoming_screen.dart';
+import '../../features/budget/presentation/budget_screen.dart';
 import '../di/providers.dart';
+import '../utils/formatters.dart';
 
 abstract final class Routes {
   static const splash = '/splash';
@@ -79,6 +81,10 @@ abstract final class Routes {
   static const workspace = '/profile/workspace';
   static const notificationSettings = '/profile/notifications';
   static const sources = '/profile/sources';
+  static const budget = '/profile/budget';
+
+  /// Budget page for one month (yyyy-MM in the query).
+  static String budgetFor(DateRangePeriod month) => Uri(path: budget, queryParameters: {'month': Fmt.monthKey(month.start)}).toString();
 }
 
 /// Root navigator, for dialogs shown from app-level code (above the pages).
@@ -165,6 +171,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.workspace, builder: (_, __) => const WorkspaceScreen()),
       GoRoute(path: Routes.notificationSettings, builder: (_, __) => const NotificationSettingsScreen()),
       GoRoute(path: Routes.sources, builder: (_, __) => const ConnectedSourcesScreen()),
+      GoRoute(path: Routes.budget, builder: (_, s) => BudgetScreen(month: BudgetScreen.parseMonth(s.uri.queryParameters['month']))),
       StatefulShellRoute.indexedStack(
         builder: (_, __, shell) => HomeShell(shell: shell),
         branches: [

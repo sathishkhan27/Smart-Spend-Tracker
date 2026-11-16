@@ -136,6 +136,7 @@ class SyncService {
 
     // Flush anything left over from a previous interrupted run first.
     await _flush(uid);
+    await _repairSmsDuplicates(req.ctx);
 
     if (req.includeSms) await _syncSms(req);
     if (req.includeGmail) await _syncGmail(req);
@@ -258,6 +259,8 @@ class SyncService {
   Future<int> _ingest(List<RawMessage> messages, ProcessingContext ctx, {required void Function(int) onScanned}) async {
     final uid = ctx.userId;
     final already = await local.processedKeys(uid, messages.map((m) => m.sourceKey));
+    // Same SMS seen under another id (live broadcast vs inbox row).
+    final seenContent = await local.processedKeys(uid, messages.expand(DuplicateDetector.smsContentKeys));
     final ledger = <String, ({String status, String? txId})>{};
     var queued = 0;
     var identified = 0, categorized = 0, duplicates = 0, review = 0;
@@ -273,6 +276,11 @@ class SyncService {
       final hint = _cardParser.parseHint(m);
       if (hint != null) _billHints.add(hint);
       if (already.contains(m.sourceKey)) continue;
+      final contentKeys = DuplicateDetector.smsContentKeys(m);
+      if (contentKeys.any(seenContent.contains)) {
+        ledger[m.sourceKey] = (status: TxStatus.duplicate.name, txId: null);
+        continue;
+      }
       final out = _processor.process(m, ctx);
       final tx = out.transaction == null ? null : _asCreditCard(out.transaction!);
       if (tx == null) {
@@ -316,6 +324,10 @@ class SyncService {
         ));
         _index[target] = _Indexed(indexed.candidate.enrichedWith(candidate), mergedSources, owner: indexed.owner);
         ledger[m.sourceKey] = (status: TxStatus.duplicate.name, txId: target);
+        if (contentKeys.isNotEmpty) {
+          ledger[contentKeys.first] = (status: 'content', txId: target);
+          seenContent.add(contentKeys.first);
+        }
       } else {
         final payload = TransactionMapper.toJson(tx);
         await local.enqueue(OutboxEntry(txId: tx.transactionId, userId: uid, op: OutboxEntry.create, payload: payload, privatePayload: private));
@@ -325,6 +337,10 @@ class SyncService {
         _new.add(tx);
         queued++;
         ledger[m.sourceKey] = (status: tx.status.name, txId: tx.transactionId);
+        if (contentKeys.isNotEmpty) {
+          ledger[contentKeys.first] = (status: 'content', txId: tx.transactionId);
+          seenContent.add(contentKeys.first);
+        }
       }
     }
     await local.markProcessed(uid, ledger);
@@ -436,8 +452,10 @@ class SyncService {
   /// v6: credit-card limits / statements backfilled from the last 45 days;
   /// v7: card statements vs reminders, revisions, bank-side payment hints;
   /// v8: replay card messages so stale card dates are rebuilt;
-  /// v9: rebuild card payments too (refunds were once counted as payments)).
-  static const _parserVersion = 9;
+  /// v9: rebuild card payments too (refunds were once counted as payments);
+  /// v10: card-spend payees ("…for UPI-…-Juice", "…on TATAPLAYLTD") filled in
+  /// on records saved without one, with their category).
+  static const _parserVersion = 10;
 
   /// One-time look-back over the last 45 days (the duplicate-check window) after a parser upgrade:
   /// previously skipped messages are re-read (new transactions such as NACH
@@ -456,6 +474,8 @@ class SyncService {
           final prev = _dues[due.key];
           if (prev == null || due.dueDate.isAfter(prev.dueDate)) _dues[due.key] = due;
         }
+        // Records saved without a payee get it from the improved parser.
+        await _fillMissingPayees(page, ctx);
         // Transactions: already-processed messages are skipped inside _ingest.
         await _ingest(page, ctx, onScanned: (_) {});
         await _flush(uid);
@@ -463,6 +483,63 @@ class SyncService {
       await local.setCursor(key, '$_parserVersion');
     } catch (e, s) {
       ErrorHandler.log(e, s, 'sync.rescan');
+    }
+  }
+
+  /// One-time clean-up of SMS saved more than once before content keys
+  /// existed (live listener + inbox read, or the same SMS twice in the inbox).
+  /// Bump the key suffix when the matching rules change so it runs again.
+  Future<void> _repairSmsDuplicates(ProcessingContext ctx) async {
+    final uid = ctx.userId;
+    final key = '$uid:repair_sms_dupes_v3';
+    if (await local.cursor(key) == '1') return;
+    try {
+      final now = DateTime.now().toUtc();
+      final all = await transactions.candidatesBetween(
+          ctx.workspaceId, now.subtract(const Duration(days: AppConfig.initialSyncDays + 2)), now.add(const Duration(days: 2)));
+      final mine = all.where((t) => t.ownerUserId == uid && t.sources.contains(TxSource.sms));
+      // Only records with a same-amount neighbour within 30 minutes can be
+      // copies, so only those need their private source details read.
+      final groups = <String, List<FinancialTransaction>>{};
+      for (final t in mine) {
+        groups.putIfAbsent(DuplicateDetector.amountKey(t), () => []).add(t);
+      }
+      bool near(FinancialTransaction a, FinancialTransaction b) =>
+          a.transactionId != b.transactionId && a.transactionDate.difference(b.transactionDate).abs() <= const Duration(minutes: 30);
+      final suspects = [
+        for (final g in groups.values)
+          if (g.length > 1) ...g.where((t) => g.any((o) => near(t, o))),
+      ];
+      final items = <({FinancialTransaction tx, TransactionSourceDetails src})>[];
+      for (final t in suspects) {
+        final d = await transactions.sourceDetails(t.transactionId, uid);
+        if (d != null) items.add((tx: t, src: d));
+      }
+      for (final p in DuplicateDetector.smsTwins(items)) {
+        await transactions.removeDuplicate(keepId: p.keep, dropId: p.drop, uid: uid, messageIds: p.dropIds);
+        _index.remove(p.drop);
+      }
+      await local.setCursor(key, '1');
+    } catch (e, s) {
+      ErrorHandler.log(e, s, 'sync.repairSmsDupes'); // retried on the next sync
+    }
+  }
+
+  /// Re-reads already-saved SMS and adds the payee (and, while still
+  /// "Others", the category) to records that were saved without one.
+  Future<void> _fillMissingPayees(List<RawMessage> page, ProcessingContext ctx) async {
+    final saved = await local.processedTxIds(ctx.userId, page.map((m) => m.sourceKey));
+    if (saved.isEmpty) return;
+    for (final m in page) {
+      final id = saved[m.sourceKey];
+      if (id == null) continue;
+      final tx = _processor.process(m, ctx).transaction;
+      if (tx?.counterparty == null) continue;
+      try {
+        await transactions.fillMissingPayee(id, tx!);
+      } catch (e, s) {
+        ErrorHandler.log(e, s, 'sync.fillPayee'); // not ours / deleted — skip
+      }
     }
   }
 

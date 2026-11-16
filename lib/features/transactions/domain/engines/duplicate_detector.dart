@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import '../../../../core/utils/app_clock.dart';
 
 import '../transaction.dart';
+import 'raw_message.dart';
 import '../transaction_enums.dart';
 
 /// Minimal shape needed to compare two financial events.
@@ -79,9 +80,16 @@ class DuplicateResult {
 /// Detects when two messages (e.g. an SMS and an email) describe the same
 /// financial event so the amount is counted exactly once.
 class DuplicateDetector {
-  const DuplicateDetector({this.timeWindow = const Duration(hours: 36)});
+  const DuplicateDetector({
+    this.timeWindow = const Duration(hours: 36),
+    this.sameSourceWindow = const Duration(minutes: 15),
+  });
 
   final Duration timeWindow;
+
+  /// How far apart two alerts from the same channel (e.g. two SMS) may be and
+  /// still describe one payment.
+  final Duration sameSourceWindow;
 
   /// Deterministic transaction ID. Using a stable ID makes Firestore writes
   /// idempotent: re-processing the same message never creates a new record.
@@ -96,6 +104,160 @@ class DuplicateDetector {
         ? 'ref|$workspaceId|${referenceNumber.toUpperCase()}|${amount.toStringAsFixed(2)}|${direction.name}'
         : 'msg|$workspaceId|$sourceKey';
     return sha256.convert(utf8.encode(basis)).toString().substring(0, 28);
+  }
+
+  /// Content keys for one SMS: the same text from the same sender received
+  /// within ~10 minutes. The live broadcast and the inbox row of a single SMS
+  /// carry different ids (`live-<time>-<sender>` vs the inbox `_id`), so the
+  /// id-based ledger alone lets the same message be saved twice.
+  ///
+  /// Returns `[own, previousBucket, nextBucket]`; the first is recorded after
+  /// processing, all three are looked up before. Only hashes are stored,
+  /// never the body. Empty for non-SMS messages.
+  static List<String> smsContentKeys(RawMessage m, {Duration bucket = const Duration(minutes: 10)}) {
+    if (m.source != TxSource.sms) return const [];
+    // Operator prefixes vary between deliveries ("VM-HDFCBK" vs "AD-HDFCBK").
+    final sender = m.sender.toUpperCase().replaceFirst(RegExp(r'^[A-Z]{2}-'), '').replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    final body = m.body.trim().replaceAll(RegExp(r'\s+'), ' ');
+    final hash = sha256.convert(utf8.encode('$sender|$body')).toString().substring(0, 24);
+    final b = m.receivedAt.millisecondsSinceEpoch ~/ bucket.inMilliseconds;
+    return ['smsbody:$hash:$b', 'smsbody:$hash:${b - 1}', 'smsbody:$hash:${b + 1}'];
+  }
+
+  /// Removes records that describe the same payment as another record in
+  /// [txs], keeping the original order. Uses the same rules as sync ([score]),
+  /// plus identical records (same SMS saved twice) a couple of minutes apart.
+  /// Applied wherever transactions are read, so lists and totals stay right
+  /// even before duplicates already saved are cleaned up.
+  static List<FinancialTransaction> collapse(List<FinancialTransaction> txs) {
+    if (txs.length < 2) return txs;
+    const detector = DuplicateDetector();
+    bool same(FinancialTransaction a, FinancialTransaction b) {
+      if (a.transactionId == b.transactionId) return true;
+      if (detector.score(DedupeCandidate.fromTransaction(a), DedupeCandidate.fromTransaction(b)) >= 0.75) return true;
+      return twinKey(a) == twinKey(b) &&
+          a.sources.toSet().containsAll(b.sources) &&
+          b.sources.toSet().containsAll(a.sources) &&
+          a.transactionDate.difference(b.transactionDate).abs() <= const Duration(minutes: 2);
+    }
+
+    // Preferred copy first: more sources, user-corrected, has a reference
+    // number, then oldest.
+    int rank(FinancialTransaction a, FinancialTransaction b) {
+      final bySources = b.sources.length.compareTo(a.sources.length);
+      if (bySources != 0) return bySources;
+      final byCorrected = (b.categoryConfidence >= 1 ? 1 : 0).compareTo(a.categoryConfidence >= 1 ? 1 : 0);
+      if (byCorrected != 0) return byCorrected;
+      final byRef = (b.referenceNumber != null ? 1 : 0).compareTo(a.referenceNumber != null ? 1 : 0);
+      if (byRef != 0) return byRef;
+      return a.createdAt.compareTo(b.createdAt);
+    }
+
+    final groups = <String, List<FinancialTransaction>>{};
+    for (final t in txs) {
+      groups.putIfAbsent('${t.amount.toStringAsFixed(2)}|${t.direction.name}', () => []).add(t);
+    }
+    final dropped = <FinancialTransaction>{};
+    for (final g in groups.values) {
+      if (g.length < 2) continue;
+      final kept = <FinancialTransaction>[];
+      for (final t in [...g]..sort(rank)) {
+        if (kept.any((k) => same(k, t))) {
+          dropped.add(t);
+        } else {
+          kept.add(t);
+        }
+      }
+    }
+    if (dropped.isEmpty) return txs;
+    return [for (final t in txs) if (!dropped.contains(t)) t];
+  }
+
+  /// Coarse key: records that can only be duplicates if they share it.
+  static String amountKey(FinancialTransaction t) => '${t.ownerUserId}|${t.amount.toStringAsFixed(2)}|${t.direction.name}';
+
+  /// Grouping key for records that could be the same SMS saved twice.
+  static String twinKey(FinancialTransaction t) => [
+        t.ownerUserId,
+        t.amount.toStringAsFixed(2),
+        t.direction.name,
+        t.narration,
+        t.counterparty ?? '',
+        t.maskedAccountNumber ?? '',
+        t.bankName ?? '',
+        t.referenceNumber ?? '',
+      ].join('|');
+
+  /// Already-saved records that are copies of one SMS. [items] carries each
+  /// record with its owner-only source details. Two records are copies when
+  /// they agree on amount, direction, payee, account, bank and reference
+  /// ([twinKey]), are within [window] of each other, came from different SMS
+  /// rows, and either
+  ///  * one came from the live listener (`sms:live-…`) and one from the inbox, or
+  ///  * both carry the same sender and the same SMS text (the same message
+  ///    stored twice in the inbox, e.g. after an SMS backup restore), or
+  ///  * they are two differently worded SMS for one payment (same payee,
+  ///    minutes apart, no conflicting reference — see [score]).
+  ///
+  /// Keeps the copy with more sources, then one the user corrected, then an
+  /// inbox one, then the oldest. Triplicates collapse into one record.
+  static List<({String keep, String drop, List<String> dropIds})> smsTwins(
+    List<({FinancialTransaction tx, TransactionSourceDetails src})> items, {
+    Duration window = const Duration(minutes: 30),
+  }) {
+    List<String> smsIds(TransactionSourceDetails d) => d.sourceMessageIds.where((i) => i.startsWith('sms:')).toList();
+    bool isLive(TransactionSourceDetails d) {
+      final ids = smsIds(d);
+      return ids.isNotEmpty && ids.every((i) => i.startsWith('sms:live-'));
+    }
+
+    String sender(String? s) => (s ?? '').toUpperCase().replaceFirst(RegExp(r'^[A-Z]{2}-'), '').replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    String text(String? s) => (s ?? '').trim().replaceAll(RegExp(r'\s+'), ' ');
+
+    bool twins(({FinancialTransaction tx, TransactionSourceDetails src}) a, ({FinancialTransaction tx, TransactionSourceDetails src}) b) {
+      if (a.tx.transactionDate.difference(b.tx.transactionDate).abs() > window) return false;
+      final ia = smsIds(a.src), ib = smsIds(b.src);
+      if (ia.isEmpty || ib.isEmpty || ia.toSet().intersection(ib.toSet()).isNotEmpty) return false;
+      if (const DuplicateDetector().score(DedupeCandidate.fromTransaction(a.tx), DedupeCandidate.fromTransaction(b.tx)) >= 0.75) return true;
+      if (twinKey(a.tx) != twinKey(b.tx)) return false;
+      if (isLive(a.src) != isLive(b.src)) return true;
+      final ta = text(a.src.originalNarration);
+      return ta.isNotEmpty &&
+          ta == text(b.src.originalNarration) &&
+          sender(a.src.smsSender).isNotEmpty &&
+          sender(a.src.smsSender) == sender(b.src.smsSender);
+    }
+
+    int rank(({FinancialTransaction tx, TransactionSourceDetails src}) a, ({FinancialTransaction tx, TransactionSourceDetails src}) b) {
+      final bySources = b.tx.sources.length.compareTo(a.tx.sources.length);
+      if (bySources != 0) return bySources;
+      final byCorrected = (b.tx.categoryConfidence >= 1 ? 1 : 0).compareTo(a.tx.categoryConfidence >= 1 ? 1 : 0);
+      if (byCorrected != 0) return byCorrected;
+      final byInbox = (isLive(a.src) ? 1 : 0).compareTo(isLive(b.src) ? 1 : 0);
+      if (byInbox != 0) return byInbox;
+      return a.tx.createdAt.compareTo(b.tx.createdAt);
+    }
+
+    final out = <({String keep, String drop, List<String> dropIds})>[];
+    final groups = <String, List<({FinancialTransaction tx, TransactionSourceDetails src})>>{};
+    for (final it in items) {
+      if (!it.tx.sources.contains(TxSource.sms)) continue;
+      groups.putIfAbsent(amountKey(it.tx), () => []).add(it);
+    }
+    for (final g in groups.values) {
+      if (g.length < 2) continue;
+      g.sort(rank);
+      final keepers = <({FinancialTransaction tx, TransactionSourceDetails src})>[];
+      for (final it in g) {
+        final k = keepers.where((k) => twins(k, it)).firstOrNull;
+        if (k == null) {
+          keepers.add(it);
+        } else {
+          out.add((keep: k.tx.transactionId, drop: it.tx.transactionId, dropIds: it.src.sourceMessageIds));
+        }
+      }
+    }
+    return out;
   }
 
   /// Normalized fingerprint stored on the transaction for server-side checks.
@@ -165,10 +327,18 @@ class DuplicateDetector {
     final gap = a.dateUtc.difference(b.dateUtc).abs();
     if (gap > timeWindow) return 0;
 
-    // Two events of the same amount from the SAME source type are probably two
-    // genuine payments (e.g. two coffees) unless they share a reference.
+    // Same source type (e.g. two SMS): usually two genuine payments, but a
+    // bank often sends two differently worded alerts for one payment (debit
+    // alert + UPI confirmation). Treat them as one only when the payee matches
+    // and they are minutes apart. Two different references of the same kind
+    // were already ruled out above, so a real repeat payment with its own
+    // UPI ref stays separate.
     final sameSourceType = a.sources.isNotEmpty && b.sources.isNotEmpty && a.sources.toSet().intersection(b.sources.toSet()).isNotEmpty;
-    if (sameSourceType) return 0;
+    if (sameSourceType) {
+      if (!_namesSimilar(a.counterparty, b.counterparty)) return 0;
+      if (gap > sameSourceWindow) return 0;
+      return (0.8 - penalty).clamp(0, 1).toDouble();
+    }
 
     var s = 0.55; // amount + direction
     if (acct == true) s += 0.2;

@@ -126,3 +126,7 @@ flutter:
 # (missing foregroundServiceConfig). Use a later 0.9.x Apple build that matches.
 dependency_overrides:
   workmanager_apple: ">=0.9.5 <0.9.10"
+  # Patched copy of 3.3.2 — fixes "setState() called during build" when a tab
+  # or page comes back into view. See packages/flutter_riverpod/PATCHED.md.
+  flutter_riverpod:
+    path: packages/flutter_riverpod

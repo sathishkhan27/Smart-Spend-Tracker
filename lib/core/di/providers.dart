@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/auth/data/auth_repository.dart';
+import '../../features/budget/data/budget_alerter.dart';
 import '../../features/cards/data/credit_card_repository.dart';
 import '../../features/cards/domain/credit_card.dart';
 import '../../features/dashboard/data/monthly_stats_repository.dart';
@@ -84,9 +85,34 @@ final syncServiceProvider = Provider<SyncService>((ref) {
         initial: initial,
         hasFailures: p.hasFailures,
       );
+      ref.read(budgetCheckProvider)();
     },
   );
 });
+
+final budgetAlerterProvider = Provider((ref) => BudgetAlerter(
+      db: ref.watch(firestoreProvider),
+      transactions: ref.watch(transactionRepositoryProvider),
+      local: ref.watch(notificationServiceProvider),
+      inbox: ref.watch(notificationRepositoryProvider),
+    ));
+
+/// Compares this month's spending with the user's monthly budget and alerts
+/// at 80% / when crossed (once each per month). Called after every sync and
+/// when the budget is changed.
+final budgetCheckProvider = Provider<Future<void> Function()>((ref) => () async {
+      final profile = ref.read(profileProvider).value;
+      final wid = ref.read(activeWorkspaceIdProvider);
+      if (profile == null || wid == null || profile.monthlyBudget == null) return;
+      await ref.read(budgetAlerterProvider).check(
+            uid: profile.uid,
+            workspaceId: wid,
+            budget: profile.monthlyBudget,
+            alerted: profile.budgetAlerts,
+            prefs: profile.notificationPrefs,
+            currency: ref.read(activeWorkspaceProvider).value?.currency ?? profile.currency,
+          );
+    });
 
 // ---------------------------------------------------------------------------
 // Session state

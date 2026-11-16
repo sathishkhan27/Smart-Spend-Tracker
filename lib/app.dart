@@ -263,6 +263,7 @@ class _SessionEffectsState extends ConsumerState<SessionEffects> with WidgetsBin
         if (fresh.isNotEmpty && profile != null) {
           await SyncAnnouncer(ref.read(notificationServiceProvider), ref.read(notificationRepositoryProvider))
               .announce(uid: profile.uid, txs: fresh, prefs: profile.notificationPrefs);
+          await ref.read(budgetCheckProvider)();
         }
       }, onError: (Object e) => ErrorHandler.log(e, null, 'sms.live'));
     });

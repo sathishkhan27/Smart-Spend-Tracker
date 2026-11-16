@@ -18,6 +18,7 @@ import '../../../core/widgets/category_icon.dart';
 import '../../../core/widgets/common.dart';
 import '../../dashboard/presentation/widgets/period_selector.dart';
 import '../domain/category.dart';
+import '../domain/engines/duplicate_detector.dart';
 import '../domain/transaction.dart';
 import '../domain/transaction_enums.dart';
 import '../domain/transaction_filter.dart';
@@ -120,7 +121,14 @@ class _TransactionsScreenState extends ConsumerState<TransactionsScreen> {
     super.dispose();
   }
 
+  /// Bumped on every reload. A page that arrives for an older generation
+  /// (e.g. the first load still in flight when a filter changes) is dropped,
+  /// otherwise both result sets are appended and every row — and the
+  /// in/out totals — appear twice.
+  int _generation = 0;
+
   Future<void> _reload() async {
+    _generation++;
     _items.clear();
     _cursor = null;
     _hasMore = true;
@@ -131,19 +139,24 @@ class _TransactionsScreenState extends ConsumerState<TransactionsScreen> {
   Future<void> _loadMore({bool force = false}) async {
     final wid = ref.read(activeWorkspaceIdProvider);
     if (wid == null || (_loading && !force) || !_hasMore) return;
+    final gen = _generation;
     setState(() => _loading = true);
     try {
       final page = await ref.read(transactionRepositoryProvider).page(wid, _filter, after: _cursor);
-      if (!mounted) return;
+      if (!mounted || gen != _generation) return;
       setState(() {
-        _items.addAll(page.items);
+        // Copies of one payment can land on different pages.
+        final merged = DuplicateDetector.collapse([..._items, ...page.items]);
+        _items
+          ..clear()
+          ..addAll(merged);
         _cursor = page.cursor;
         _hasMore = page.hasMore;
       });
     } on AppFailure catch (e) {
-      if (mounted) setState(() => _error = e);
+      if (mounted && gen == _generation) setState(() => _error = e);
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && gen == _generation) setState(() => _loading = false);
     }
   }
 

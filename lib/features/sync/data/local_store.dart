@@ -60,6 +60,23 @@ class LocalStore {
     return out;
   }
 
+  /// Saved transaction id for each of [keys] that produced one.
+  Future<Map<String, String>> processedTxIds(String userId, Iterable<String> keys) async {
+    final list = keys.toList();
+    final out = <String, String>{};
+    for (var i = 0; i < list.length; i += 500) {
+      final chunk = list.sublist(i, i + 500 > list.length ? list.length : i + 500);
+      final rows = await _db.query('processed_messages',
+          columns: ['source_key', 'tx_id'],
+          where: 'user_id = ? AND tx_id IS NOT NULL AND source_key IN (${List.filled(chunk.length, '?').join(',')})',
+          whereArgs: [userId, ...chunk]);
+      for (final r in rows) {
+        out[r['source_key'] as String] = r['tx_id'] as String;
+      }
+    }
+    return out;
+  }
+
   Future<void> markProcessed(String userId, Map<String, ({String status, String? txId})> entries) async {
     final batch = _db.batch();
     final now = DateTime.now().millisecondsSinceEpoch;

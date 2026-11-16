@@ -449,10 +449,9 @@ packages:
   flutter_riverpod:
     dependency: "direct main"
     description:
-      name: flutter_riverpod
-      sha256: "9255e1e3ad6e38906a1b4f8287678f95f378744c5b46b1985588543f3f19046e"
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/flutter_riverpod"
+      relative: true
+    source: path
     version: "3.3.2"
   flutter_secure_storage:
     dependency: "direct main"

@@ -70,6 +70,17 @@ class TransactionParser {
       caseSensitive: false);
 
   static final _merchantPatterns = <RegExp>[
+    // Card spends (ICICI and similar), checked first because the generic
+    // patterns below miss this wording:
+    // "Credit Card XX4007 debited for INR 20.00 on 13-Nov-26 for UPI-XXXXXXXX4496-Juice. To dispute…"
+    RegExp(r'\bfor\s+upi[\s\-/]+[x\d]+[\s\-/]+([a-z0-9&.\x27*\- ]{2,40}?)(?=\.\s|\.$|\s+to dispute|\s+avl|,|;|$)', caseSensitive: false),
+    // "Credit Card XX8003 debited for INR 1,299.00 on 12-Nov-26 for AMAZON PAY INDIA PRIVA. To dispute…"
+    RegExp(
+        r'\bcard\s+[x*]*\d{3,4}\s+debited\s+for\s+(?:rs\.?|inr|₹)\s*[\d,]+(?:\.\d{1,2})?\s+on\s+\S+?\s+(?:for|at|towards)\s+(?!upi\b)([a-z0-9&.\x27*\- ]{2,40}?)(?=\.\s|\.$|\s+to dispute|\s+avl|,|;|$)',
+        caseSensitive: false),
+    // "INR 265.00 spent using ICICI Bank Card XX8003 on 07-Nov-26 on TATAPLAYLTD. Avl Limit…"
+    RegExp(r'\bspent\s+(?:using|on|via)\s+.{0,40}?card\s+[x*]*\d{3,4}\s+on\s+\S+?\s+(?:on|at)\s+([a-z0-9&.\x27*\- ]{2,40}?)(?=\.\s|\.$|\s+avl|,|;|$)',
+        caseSensitive: false),
     // SBI: "has a credit by NACH- INFOSYS LIMITED of Rs 26.00"
     RegExp(r'\bn?ach[\s\-:]+(?!cr\b|dr\b|c\b|d\b|credit\b|debit\b)([a-z][a-z0-9&.\x27 ]{2,40}?)(?=\s+of\s|\s+on\b|\s*[-/]|\s+(?:div|dividend|int|fin|final|interim|ref|dt)\b|\.|,|;|$)', caseSensitive: false),
     // "ACH/INFOSYS LIMITED/FIN DIV", "ACH Credit INFOSYS LTD DIVIDEND"
@@ -77,7 +88,8 @@ class TransactionParser {
     RegExp(
         r'\be?n?ach[\s\-:]*(?:cr|dr|c|d)\b[\s\-:]+(?:to\s+|from\s+|for\s+)?([a-z0-9&.\x27 ]{3,40}?)(?=\s*[-/]|\s+(?:div|dividend|int|fin|final|interim|on|ref|dt|a/c)\b|\.|,|;|$)',
         caseSensitive: false),
-    RegExp(r'\binfo[:\-]\s*(?:upi/[a-z0-9]+/\d+/)?([a-z0-9&.\x27 \-]{3,40})', caseSensitive: false),
+    // "Info: MAKEMYTRIP INDIA. Avl Lmt…" — stop at the sentence end, not 40 chars on.
+    RegExp(r'\binfo[:\-]\s*(?:upi/[a-z0-9]+/\d+/)?([a-z0-9&.\x27 \-]{3,40}?)(?=\.\s|\.$|,|;|\s+avl\b|\s+avbl\b|$)', caseSensitive: false),
     RegExp(r'\b(?:at|@)\s+([a-z0-9&.\x27*\- ]{2,40}?)(?=\s+on\b|\s+via\b|\s+ref|\s+txn|\s+using|\.|,|;|\s*\(|$)', caseSensitive: false),
     RegExp(r'\b(?:paid to|sent to|transfer(?:red)? to|trf to|payment to|to vpa|towards)\s+([a-z0-9&.\x27@\- ]{2,40}?)(?=\s+on\b|\s+via\b|\s+ref|\s+upi|\.|,|;|\s*\(|$)', caseSensitive: false),
     RegExp(r'\b(?:from|by)\s+(?!transfer\b|cash\b|clearing\b|rs\.?\s*\d|inr\s*\d|₹)(?:vpa\s+)?([a-z0-9&.\x27@\- ]{2,40}?)(?=\s+on\b|\s+via\b|\s+ref|\s+upi|\s+a/c|\.|,|;|\s*\(|$)', caseSensitive: false),
@@ -489,7 +501,9 @@ class TransactionParser {
   String _normalizedNarration(TxType? type, TxDirection? dir, String? cp, PaymentMode mode, String? bank) {
     final label = type?.label ?? (dir == TxDirection.inflow ? 'Money credited' : 'Money debited');
     final prep = dir == TxDirection.inflow ? 'from' : (mode == PaymentMode.debitCard || mode == PaymentMode.creditCard ? 'at' : 'to');
-    final via = mode == PaymentMode.other ? '' : ' via ${mode.label}';
+    // "Credit card payment at X" already names the card; skip " via Credit Card".
+    final cardLabel = type == TxType.creditCardPayment || type == TxType.debitCardPayment;
+    final via = mode == PaymentMode.other || (cardLabel && cp != null) ? '' : ' via ${mode.label}';
     if (cp != null) return '$label $prep $cp$via';
     if (bank != null) return '$label • $bank$via';
     return '$label$via';

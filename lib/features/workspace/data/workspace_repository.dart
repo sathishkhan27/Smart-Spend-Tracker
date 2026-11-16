@@ -212,6 +212,11 @@ class WorkspaceRepository {
       initialSyncComplete: d['initialSyncComplete'] as bool? ?? false,
       themeMode: d['themeMode'] as String? ?? 'light',
       notificationPrefs: Map<String, bool>.from((d['notificationPrefs'] as Map?) ?? const {}),
+      monthlyBudget: (d['monthlyBudget'] as num?)?.toDouble(),
+      budgetAlerts: {
+        for (final e in ((d['budgetAlerts'] as Map?) ?? const {}).entries)
+          if (e.value is num) e.key as String: (e.value as num).toInt(),
+      },
     );
   }
 

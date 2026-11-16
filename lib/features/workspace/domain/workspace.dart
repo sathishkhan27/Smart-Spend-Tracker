@@ -55,6 +55,8 @@ class UserProfile {
     this.initialSyncComplete = false,
     this.themeMode = 'light',
     this.notificationPrefs = const {},
+    this.monthlyBudget,
+    this.budgetAlerts = const {},
   });
 
   final String uid;
@@ -70,6 +72,12 @@ class UserProfile {
   final bool initialSyncComplete;
   final String themeMode;
   final Map<String, bool> notificationPrefs;
+
+  /// Monthly spending budget in the workspace currency; null = not set.
+  final double? monthlyBudget;
+
+  /// yyyy-MM → highest budget alert already sent that month (80 or 100).
+  final Map<String, int> budgetAlerts;
 
   String get firstName => (displayName ?? email).split(RegExp(r'[\s@]')).first;
   String get initials {
@@ -90,6 +98,7 @@ abstract final class NotificationPrefKeys {
   static const syncFailed = 'syncFailed';
   static const unusualSpending = 'unusualSpending';
   static const workspaceActivity = 'workspaceActivity';
+  static const budget = 'budget';
 
   static const labels = {
     newTransaction: 'New transaction detected',
@@ -99,5 +108,6 @@ abstract final class NotificationPrefKeys {
     syncFailed: 'Failed synchronization',
     unusualSpending: 'Unusual spending',
     workspaceActivity: 'Shared workspace activity',
+    budget: 'Monthly budget alerts (80% and over budget)',
   };
 }

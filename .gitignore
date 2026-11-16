@@ -40,3 +40,13 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local patched copy of flutter_riverpod (see pubspec.yaml dependency_overrides).
+# Kept out of git on purpose: builds on another machine need it restored there.
+/packages/flutter_riverpod/
+
+# Test files are kept local (tests already in git are marked skip-worktree).
+/test/
+
+# Kotlin compiler cache from Android builds.
+/android/.kotlin/

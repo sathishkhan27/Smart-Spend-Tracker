@@ -4,6 +4,7 @@ import '../../../core/errors/failures.dart';
 import '../../../core/utils/app_clock.dart';
 import '../../sync/data/local_store.dart';
 import '../domain/category.dart';
+import '../domain/engines/duplicate_detector.dart';
 import '../domain/engines/transaction_processor.dart';
 import '../domain/transaction.dart';
 import '../domain/transaction_enums.dart';
@@ -38,11 +39,11 @@ class TransactionRepository {
       _range(workspaceId, startLocal, endLocal)
           .limit(rangeLimit)
           .snapshots()
-          .map((q) => q.docs.map(TransactionMapper.fromFirestore).toList());
+          .map((q) => DuplicateDetector.collapse(q.docs.map(TransactionMapper.fromFirestore).toList()));
 
   Future<List<FinancialTransaction>> getRange(String workspaceId, DateTime startLocal, DateTime endLocal, {int limit = rangeLimit}) async {
     final q = await _range(workspaceId, startLocal, endLocal).limit(limit).get();
-    return q.docs.map(TransactionMapper.fromFirestore).toList();
+    return DuplicateDetector.collapse(q.docs.map(TransactionMapper.fromFirestore).toList());
   }
 
   Stream<List<FinancialTransaction>> watchRecent(String workspaceId, {int limit = 8}) => _col
@@ -50,7 +51,7 @@ class TransactionRepository {
       .orderBy('transactionDate', descending: true)
       .limit(limit)
       .snapshots()
-      .map((q) => q.docs.map(TransactionMapper.fromFirestore).toList());
+      .map((q) => DuplicateDetector.collapse(q.docs.map(TransactionMapper.fromFirestore).toList()));
 
   Stream<FinancialTransaction?> watch(String id) =>
       _col.doc(id).snapshots().map((s) => s.exists ? TransactionMapper.fromFirestore(s) : null);
@@ -103,7 +104,7 @@ class TransactionRepository {
         if (snap.docs.isNotEmpty) cursor = snap.docs.last;
         items.addAll(snap.docs.map(TransactionMapper.fromFirestore).where((t) => f.matches(t, skip: server)));
       }
-      return TransactionPage(items, cursor, hasMore);
+      return TransactionPage(DuplicateDetector.collapse(items), cursor, hasMore);
     } catch (e) {
       throw ErrorHandler.map(e);
     }
@@ -183,6 +184,76 @@ class TransactionRepository {
     }
   }
 
+  /// Fills in a payee the record was saved without (an older parser missed
+  /// it), with the matching narration and search words. The category is
+  /// replaced only while it is still "Others" and the user hasn't set it.
+  /// Returns true when something changed.
+  Future<bool> fillMissingPayee(String id, FinancialTransaction parsed) async {
+    final cp = parsed.counterparty;
+    if (cp == null) return false;
+    final ref = _col.doc(id);
+    final snap = await ref.get();
+    final d = snap.data();
+    if (d == null || d['counterparty'] != null) return false;
+    final recategorize = d['userCorrected'] != true && d['categoryId'] == Categories.others.id && parsed.categoryId != Categories.others.id;
+    await ref.update({
+      'counterparty': cp,
+      'merchant': d['merchant'] ?? parsed.merchant,
+      'narration': parsed.narration,
+      'searchKeywords': FieldValue.arrayUnion(TransactionProcessor.buildSearchKeywords([cp, parsed.merchant, parsed.narration])),
+      if (recategorize) ...{
+        'categoryId': parsed.categoryId,
+        'categoryName': parsed.categoryName,
+        'subcategory': parsed.subcategory,
+        'categoryConfidence': parsed.categoryConfidence,
+      },
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    return true;
+  }
+
+  /// After the user files a payee under a category ("apply to this
+  /// merchant"), moves their other transactions from that payee that are still
+  /// in "Others" to it. Records the user can't edit (another member's) or has
+  /// categorised by hand are left alone. Returns how many changed.
+  Future<int> applyCategoryToPayee({
+    required String workspaceId,
+    required String counterparty,
+    required CategoryDef category,
+    String? subcategory,
+    required String exceptId,
+  }) async {
+    try {
+      final q = await _col
+          .where('workspaceId', isEqualTo: workspaceId)
+          .where('counterparty', isEqualTo: counterparty)
+          .where('categoryId', isEqualTo: Categories.others.id)
+          .limit(300)
+          .get();
+      var changed = 0;
+      for (final d in q.docs) {
+        if (d.id == exceptId || d.data()['userCorrected'] == true) continue;
+        try {
+          await d.reference.update({
+            'categoryId': category.id,
+            'categoryName': category.name,
+            'categoryIcon': category.iconKey,
+            'subcategory': subcategory,
+            'categoryConfidence': 1.0,
+            if (d.data()['status'] == TxStatus.needsReview.name) 'status': TxStatus.success.name,
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+          changed++;
+        } catch (_) {
+          // Not ours to edit — skip.
+        }
+      }
+      return changed;
+    } catch (e) {
+      throw ErrorHandler.map(e);
+    }
+  }
+
   Future<void> setStatus(String id, TxStatus status) => _col.doc(id).update({'status': status.name, 'updatedAt': FieldValue.serverTimestamp()});
 
   Future<void> setInternalTransfer(String id, bool value) =>
@@ -203,6 +274,16 @@ class TransactionRepository {
     } catch (e) {
       throw ErrorHandler.map(e);
     }
+  }
+
+  /// Removes [dropId], a second copy of the same event, after moving its
+  /// source message ids onto [keepId] so neither is re-imported.
+  Future<void> removeDuplicate({required String keepId, required String dropId, required String uid, required List<String> messageIds}) async {
+    await _col.doc(keepId).collection('private').doc(uid).set(
+      {'sourceMessageIds': FieldValue.arrayUnion(messageIds)},
+      SetOptions(merge: true),
+    );
+    await delete(dropId, uid);
   }
 
   String newId() => _col.doc().id;
