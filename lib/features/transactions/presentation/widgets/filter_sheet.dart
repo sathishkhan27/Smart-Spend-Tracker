@@ -13,6 +13,8 @@ import '../../domain/transaction_filter.dart';
 Future<TransactionFilter?> showFilterSheet(BuildContext context, WidgetRef ref, TransactionFilter initial) =>
     showModalBottomSheet<TransactionFilter>(
       context: context,
+      // Open above the floating bottom nav bar, not inside the tab under it.
+      useRootNavigator: true,
       isScrollControlled: true,
       builder: (_) => _FilterSheet(initial: initial),
     );

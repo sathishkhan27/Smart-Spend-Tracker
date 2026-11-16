@@ -68,6 +68,18 @@ class _Body extends ConsumerWidget {
               subcategory: pick.subcategory,
               userId: ref.read(authStateProvider).value!.uid,
             );
+        // Earlier transactions from the same payee that are still in Others.
+        final others = await ref.read(transactionRepositoryProvider).applyCategoryToPayee(
+              workspaceId: tx.workspaceId,
+              counterparty: merchant,
+              category: pick.category,
+              subcategory: pick.subcategory,
+              exceptId: tx.transactionId,
+            );
+        if (context.mounted) {
+          showSnack(context, others == 0 ? 'Updated to ${pick.category.name}' : 'Updated to ${pick.category.name} (+$others more from $merchant)');
+        }
+        return;
       }
       if (context.mounted) showSnack(context, 'Updated to ${pick.category.name}');
     } on AppFailure catch (e) {

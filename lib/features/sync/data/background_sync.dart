@@ -6,6 +6,7 @@ import 'package:workmanager/workmanager.dart';
 
 import '../../../core/utils/app_clock.dart';
 import '../../../firebase_options.dart';
+import '../../budget/data/budget_alerter.dart';
 import '../../cards/data/credit_card_repository.dart';
 import '../../notifications/data/notification_repository.dart';
 import '../../notifications/data/notification_service.dart';
@@ -89,6 +90,18 @@ void callbackDispatcher() {
         uid: user.uid,
         txs: result.newTransactions,
         prefs: prefs,
+      );
+      final workspace = (await db.collection('workspaces').doc(wid).get()).data();
+      await BudgetAlerter(db: db, transactions: TransactionRepository(db), local: notifications, inbox: NotificationRepository(db)).check(
+        uid: user.uid,
+        workspaceId: wid,
+        budget: (data?['monthlyBudget'] as num?)?.toDouble(),
+        alerted: {
+          for (final e in ((data?['budgetAlerts'] as Map?) ?? const {}).entries)
+            if (e.value is num) e.key as String: (e.value as num).toInt(),
+        },
+        prefs: prefs,
+        currency: workspace?['currency'] as String? ?? data?['currency'] as String? ?? 'INR',
       );
       return true;
     } catch (_) {

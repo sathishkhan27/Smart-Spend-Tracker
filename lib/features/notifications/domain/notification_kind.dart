@@ -10,7 +10,7 @@ import '../../../core/theme/app_colors.dart';
 enum NotificationChannel {
   transactions('ss_transactions_v2', 'Transactions', 'New debits and credits detected from SMS or email', high: true),
   reminders('ss_reminders_v2', 'Payment reminders', 'Bills, EMIs and subscriptions due in 2 days, tomorrow or today', high: true),
-  alerts('ss_alerts_v2', 'Important alerts', 'Overdue payments and unusual spending', high: true),
+  alerts('ss_alerts_v2', 'Important alerts', 'Overdue payments, unusual spending and budget alerts', high: true),
   workspace('ss_workspace_v2', 'Workspace activity', 'Transactions added by members of your shared workspace'),
   sync('ss_sync', 'Sync status', 'Background sync results', silent: true);
 
@@ -38,6 +38,7 @@ enum NotificationKind {
   upcoming('upcoming', 'Reminder', Icons.event_rounded, Color(0xFFE09A1F), NotificationChannel.reminders),
   overdue('overdue', 'Overdue', Icons.error_rounded, AppColors.expense, NotificationChannel.alerts),
   unusual('unusual', 'Alert', Icons.trending_up_rounded, Color(0xFFEB6834), NotificationChannel.alerts),
+  budget('budget', 'Budget', Icons.account_balance_wallet_rounded, AppColors.expense, NotificationChannel.alerts),
   uncategorized('uncategorized', 'Needs review', Icons.help_outline_rounded, Color(0xFF7B8495), NotificationChannel.transactions),
   workspace('workspace', 'Workspace', Icons.groups_rounded, Color(0xFF6250D6), NotificationChannel.workspace),
   sync('sync', 'Sync', Icons.cloud_done_rounded, AppColors.income, NotificationChannel.sync),
@@ -54,7 +55,7 @@ enum NotificationKind {
   NotificationFilter get filter => switch (this) {
         upcoming || overdue => NotificationFilter.reminders,
         transaction || uncategorized || workspace => NotificationFilter.transactions,
-        unusual || syncFailed => NotificationFilter.alerts,
+        unusual || budget || syncFailed => NotificationFilter.alerts,
         sync => NotificationFilter.all,
       };
 
@@ -62,6 +63,7 @@ enum NotificationKind {
         'upcoming' => upcoming,
         'overdue' => overdue,
         'unusual' => unusual,
+        'budget' => budget,
         'uncategorized' => uncategorized,
         'workspace' => workspace,
         'sync' => sync,

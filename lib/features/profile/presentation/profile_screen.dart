@@ -87,6 +87,7 @@ class ProfileScreen extends ConsumerWidget {
         _Group(children: [
           _Item(Icons.groups_2_outlined, 'Workspace & members', () => context.push(Routes.workspace)),
           _Item(Icons.link_rounded, 'Connected sources', () => context.push(Routes.sources)),
+          _Item(Icons.account_balance_wallet_outlined, 'Monthly budget', () => context.push(Routes.budget)),
           _Item(Icons.notifications_none_rounded, 'Notification preferences', () => context.push(Routes.notificationSettings)),
           _Item(Icons.add_card_rounded, 'Add transaction manually', () => context.push(Routes.addTransaction)),
         ]),

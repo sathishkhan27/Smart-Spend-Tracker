@@ -24,6 +24,8 @@ Future<CategoryPick?> showCategoryPicker(
 }) =>
     showModalBottomSheet<CategoryPick>(
       context: context,
+      // Open above the floating bottom nav bar, not inside the tab under it.
+      useRootNavigator: true,
       isScrollControlled: true,
       builder: (_) => _Picker(
         income: income,

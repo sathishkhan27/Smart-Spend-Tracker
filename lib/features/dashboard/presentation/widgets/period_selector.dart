@@ -20,9 +20,12 @@ class PeriodSelector extends StatelessWidget {
     var year = period.start.year;
     final picked = await showModalBottomSheet<DateRangePeriod>(
       context: context,
+      // Open above the floating bottom nav bar, not inside the tab under it.
+      useRootNavigator: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, set) => Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 28),
+          // Clear the phone's gesture bar so the last row of months is tappable.
+          padding: EdgeInsets.fromLTRB(20, 0, 20, 28 + MediaQuery.viewPaddingOf(ctx).bottom),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
               IconButton(onPressed: () => set(() => year--), icon: const Icon(Icons.chevron_left_rounded)),
@@ -73,6 +76,8 @@ class PeriodSelector extends StatelessWidget {
     final now = AppClock.now();
     final picked = await showModalBottomSheet<int>(
       context: context,
+      // Open above the floating bottom nav bar, not inside the tab under it.
+      useRootNavigator: true,
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           for (var y = now.year; y >= now.year - 5; y--)
@@ -118,6 +123,8 @@ class PeriodSelector extends StatelessWidget {
     ];
     final type = await showModalBottomSheet<PeriodType>(
       context: context,
+      // Open above the floating bottom nav bar, not inside the tab under it.
+      useRootNavigator: true,
       builder: (ctx) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),

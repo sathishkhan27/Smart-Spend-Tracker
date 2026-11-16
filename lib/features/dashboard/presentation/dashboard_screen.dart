@@ -15,6 +15,7 @@ import '../../sync/data/sync_service.dart';
 import '../../sync/domain/sync_progress.dart';
 import '../../transactions/domain/transaction_enums.dart';
 import '../../transactions/presentation/widgets/transaction_tile.dart';
+import '../../budget/presentation/budget_card.dart';
 import '../../cards/presentation/credit_cards_section.dart';
 import '../../notifications/presentation/notification_bell.dart';
 import '../../notifications/presentation/notification_permission_banner.dart';
@@ -115,6 +116,15 @@ class DashboardScreen extends ConsumerWidget {
               ])
             : null,
       ),
+      if (period.type == PeriodType.monthly) ...[
+        const SizedBox(height: 14),
+        BudgetCard(
+          period: period,
+          spent: agg.outflow,
+          currency: agg.currency,
+          onTap: () => context.push(Routes.budgetFor(period)),
+        ),
+      ],
       const SizedBox(height: 14),
       IntrinsicHeight(
         child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -316,6 +326,8 @@ class _Header extends ConsumerWidget {
     final current = ref.read(activeWorkspaceIdProvider);
     showModalBottomSheet(
       context: context,
+      // Open above the floating bottom nav bar, not inside the tab under it.
+      useRootNavigator: true,
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('Switch workspace', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
